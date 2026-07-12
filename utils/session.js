@@ -8,13 +8,28 @@ const DASHBOARD_URL = 'https://dashboard.pokemonrevolution.net';
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+const BROWSER_HEADERS = {
+  'User-Agent': UA,
+  'Accept': '*/*',
+  'Accept-Language': 'en',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Sec-Ch-Ua': '"Not;A=Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+  'Sec-Ch-Ua-Mobile': '?0',
+  'Sec-Ch-Ua-Platform': '"Windows"',
+  'Sec-Fetch-Dest': 'empty',
+  'Sec-Fetch-Mode': 'cors',
+  'Sec-Fetch-Site': 'same-origin',
+  'Origin': DASHBOARD_URL,
+  'Referer': `${DASHBOARD_URL}/dashboard`,
+};
+
 const jar = new CookieJar();
 const client = wrapper(
   axios.create({
     jar,
     withCredentials: true,
     timeout: 15000,
-    headers: { 'User-Agent': UA },
+    headers: BROWSER_HEADERS,
   })
 );
 
