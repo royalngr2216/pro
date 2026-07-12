@@ -82,11 +82,26 @@ async function login() {
     const page = await browser.newPage();
     await page.setUserAgent(UA);
 
-    console.log('[session] navigating to dashboard...');
-    await page.goto(`${DASHBOARD_URL}/dashboard`, {
+    console.log('[session] navigating to login page...');
+    await page.goto(`${DASHBOARD_URL}/auth/login`, {
       waitUntil: 'networkidle2',
       timeout: 30000,
     });
+
+    // Give the app's own bootstrap JS a moment to finish anything it does
+    // asynchronously after networkidle2 (e.g. fetching a csrf token as part
+    // of mounting the login form).
+    await page.waitForSelector('input', { timeout: 10000 }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const visibleCookies = await page.evaluate(() => document.cookie);
+    console.log('[session] document.cookie after login page load:', visibleCookies || '(empty)');
+
+    const jarCookiesNow = await page.cookies(ROOT_URL, DASHBOARD_URL);
+    console.log(
+      '[session] all cookies (incl httpOnly) after login page load:',
+      jarCookiesNow.map((c) => c.name).join(', ') || '(none)'
+    );
 
     console.log('[session] running login mutation inside the real browser context...');
     const result = await page.evaluate(
