@@ -57,6 +57,23 @@ async function importCookiesFromPage(page) {
   }
 }
 
+async function findFirst(page, selectors) {
+  for (const sel of selectors) {
+    const el = await page.$(sel);
+    if (el) return { el, sel };
+  }
+  return null;
+}
+
+async function findButtonByText(page, patterns) {
+  const buttons = await page.$$('button');
+  for (const btn of buttons) {
+    const text = await page.evaluate((el) => el.innerText || el.textContent || '', btn);
+    if (patterns.some((p) => p.test(text))) return btn;
+  }
+  return null;
+}
+
 async function login() {
   const username = process.env.PRO_USERNAME;
   const password = process.env.PRO_PASSWORD;
@@ -88,50 +105,73 @@ async function login() {
       timeout: 30000,
     });
 
-    // Give the app's own bootstrap JS a moment to finish anything it does
-    // asynchronously after networkidle2 (e.g. fetching a csrf token as part
-    // of mounting the login form).
     await page.waitForSelector('input', { timeout: 10000 }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1000));
 
-    const visibleCookies = await page.evaluate(() => document.cookie);
-    console.log('[session] document.cookie after login page load:', visibleCookies || '(empty)');
+    const usernameField = await findFirst(page, [
+      'input[name="name"]',
+      'input[name="username"]',
+      'input[type="email"]',
+      'input[type="text"]',
+    ]);
+    const passwordField = await findFirst(page, ['input[type="password"]']);
 
-    const jarCookiesNow = await page.cookies(ROOT_URL, DASHBOARD_URL);
-    console.log(
-      '[session] all cookies (incl httpOnly) after login page load:',
-      jarCookiesNow.map((c) => c.name).join(', ') || '(none)'
-    );
-
-    console.log('[session] running login mutation inside the real browser context...');
-    const result = await page.evaluate(
-      async (rootUrl, name, password) => {
-        const query =
-          'mutation Login($name: String!, $password: String!) {\n  login(name: $name, password: $password)\n}';
-        const res = await fetch(`${rootUrl}/graphql`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ query, variables: { name, password } }),
-        });
-        const body = await res.json();
-        return { status: res.status, body };
-      },
-      ROOT_URL,
-      username,
-      password
-    );
-
-    console.log(
-      '[session] login mutation status:',
-      result.status,
-      'has errors:',
-      !!result.body.errors
-    );
-
-    if (result.body.errors) {
-      throw new Error('PRO login failed: ' + JSON.stringify(result.body.errors));
+    if (!usernameField || !passwordField) {
+      const allInputs = await page.$$eval('input', (els) =>
+        els.map((e) => ({ type: e.type, name: e.name, id: e.id }))
+      );
+      console.log('[session] could not find form fields. Inputs on page:', JSON.stringify(allInputs));
+      throw new Error('Could not locate username/password fields on the login page.');
     }
+
+    console.log('[session] found username field via', usernameField.sel, '- typing credentials...');
+    await usernameField.el.click({ clickCount: 3 });
+    await usernameField.el.type(username, { delay: 30 });
+    await passwordField.el.click({ clickCount: 3 });
+    await passwordField.el.type(password, { delay: 30 });
+
+    let submitButton = await page.$('button[type="submit"]');
+    if (!submitButton) {
+      submitButton = await findButtonByText(page, [/log\s*in/i, /sign\s*in/i]);
+    }
+
+    if (!submitButton) {
+      const allButtons = await page.$$eval('button', (els) => els.map((e) => e.innerText || e.textContent));
+      console.log('[session] could not find submit button. Buttons on page:', JSON.stringify(allButtons));
+      throw new Error('Could not locate the submit button on the login page.');
+    }
+
+    console.log('[session] clicking submit and waiting for the login network response...');
+    const [loginResponse] = await Promise.all([
+      page
+        .waitForResponse(
+          (res) =>
+            res.url().includes('/graphql') &&
+            (res.request().postData() || '').toLowerCase().includes('login'),
+          { timeout: 20000 }
+        )
+        .catch(() => null),
+      submitButton.click(),
+    ]);
+
+    if (!loginResponse) {
+      throw new Error('Did not observe a login network response within 20s after clicking submit.');
+    }
+
+    const loginResult = await loginResponse.json().catch(() => ({}));
+    console.log(
+      '[session] login form response status:',
+      loginResponse.status(),
+      'has errors:',
+      !!loginResult.errors
+    );
+
+    if (loginResult.errors) {
+      throw new Error('PRO login failed: ' + JSON.stringify(loginResult.errors));
+    }
+
+    // Give any post-login redirect/cookie-setting a brief moment to settle.
+    await new Promise((r) => setTimeout(r, 1000));
 
     await importCookiesFromPage(page);
     await refreshCsrfFromJar();
