@@ -1,9 +1,7 @@
-const axios = require('axios');
+const { client, login, getCsrfToken, DASHBOARD_URL } = require('./session');
 
-const GRAPHQL_URL = 'https://dashboard.pokemonrevolution.net/graphql';
+const GRAPHQL_URL = `${DASHBOARD_URL}/graphql`;
 
-// The exact query captured from the dashboard's own network tab.
-// Both servers are fetched in ONE request via GraphQL aliases (silver / gold).
 const QUERY = `
 {
   silver: toplists(server: silver) {
@@ -112,13 +110,37 @@ const QUERY = `
   }
 }`;
 
-// In-memory cache so we don't hammer the API on every single Discord command
-let cache = {
-  data: null,
-  lastFetched: 0,
-};
-
+let cache = { data: null, lastFetched: 0 };
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+let loggedIn = false;
+
+function isAuthError(errors) {
+  return Array.isArray(errors) && errors.some((e) => /authentication/i.test(e.message || ''));
+}
+
+async function doFetch() {
+  const headers = { 'Content-Type': 'application/json' };
+  const csrf = getCsrfToken();
+  if (csrf) headers['X-Csrf-Token'] = csrf;
+
+  const response = await client.post(
+    GRAPHQL_URL,
+    { query: QUERY, variables: {} },
+    { headers }
+  );
+
+  if (response.data.errors) {
+    if (isAuthError(response.data.errors)) {
+      const err = new Error('AUTH_REQUIRED');
+      err.isAuthError = true;
+      throw err;
+    }
+    throw new Error('GraphQL error: ' + JSON.stringify(response.data.errors));
+  }
+
+  return response.data.data;
+}
 
 async function fetchToplists(force = false) {
   const now = Date.now();
@@ -127,24 +149,27 @@ async function fetchToplists(force = false) {
     return cache.data;
   }
 
-  const response = await axios.post(
-    GRAPHQL_URL,
-    { query: QUERY, variables: {} },
-    {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 15000,
-    }
-  );
-
-  if (response.data.errors) {
-    throw new Error(
-      'GraphQL error: ' + JSON.stringify(response.data.errors)
-    );
+  if (!loggedIn) {
+    await login();
+    loggedIn = true;
   }
 
-  cache.data = response.data.data;
-  cache.lastFetched = now;
-  return cache.data;
+  try {
+    const data = await doFetch();
+    cache.data = data;
+    cache.lastFetched = now;
+    return data;
+  } catch (err) {
+    if (err.isAuthError) {
+      // Session expired mid-run — relogin once and retry before giving up.
+      await login();
+      const data = await doFetch();
+      cache.data = data;
+      cache.lastFetched = now;
+      return data;
+    }
+    throw err;
+  }
 }
 
 function getCacheAge() {
