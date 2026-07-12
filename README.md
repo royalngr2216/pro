@@ -63,9 +63,20 @@ then update the Render env var to match.
 - Data is cached in memory for 5 minutes and refreshed automatically in the
   background, so commands respond instantly instead of hitting the API
   every time.
-- Login happens once on bot startup and is reused across all requests. If
-  the session expires (PRO logs it out after some idle time or a password
-  change), the bot detects the "authentication required" error and
-  automatically re-logs in, retrying the failed request once.
+- Login uses a real headless Chrome browser (Puppeteer) once on startup and
+  whenever the session expires. This is because PRO's Cloudflare protection
+  silently blocks plain HTTP requests from getting a session cookie at all,
+  even though the request looks like it "succeeds" -- only a genuine
+  browser engine gets past that check. Once logged in, the resulting
+  session cookie is reused by lightweight axios requests for all the actual
+  polling, so the browser isn't kept running continuously.
+- Render's build will take noticeably longer on first deploy because it
+  downloads a full Chromium binary (~200-300MB) for Puppeteer. This is
+  normal.
+- If the service crashes or restarts unexpectedly right after a login
+  attempt, check Render's logs for out-of-memory errors -- headless Chrome
+  is heavier than a plain HTTP request, and the free tier's 512MB RAM can
+  be tight. If that happens consistently, the fix would be upgrading to a
+  paid Render instance with more RAM.
 - Embeds use a plain monospace table layout instead of emoji-heavy fields --
   intentional, for a cleaner "stats dashboard" look.

@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
+const puppeteer = require('puppeteer');
 
 const ROOT_URL = 'https://pokemonrevolution.net';
 const DASHBOARD_URL = 'https://dashboard.pokemonrevolution.net';
@@ -8,87 +9,52 @@ const DASHBOARD_URL = 'https://dashboard.pokemonrevolution.net';
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-const BROWSER_HEADERS = {
-  'User-Agent': UA,
-  'Accept': '*/*',
-  'Accept-Language': 'en',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Sec-Ch-Ua': '"Not;A=Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-  'Sec-Ch-Ua-Mobile': '?0',
-  'Sec-Ch-Ua-Platform': '"Windows"',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
-  'Origin': DASHBOARD_URL,
-  'Referer': `${DASHBOARD_URL}/dashboard`,
-};
-
 const jar = new CookieJar();
 const client = wrapper(
   axios.create({
     jar,
     withCredentials: true,
     timeout: 15000,
-    headers: BROWSER_HEADERS,
+    headers: { 'User-Agent': UA },
   })
 );
 
 let csrfToken = null;
 
-async function dumpAllCookies(label) {
-  const rootCookies = await jar.getCookies(ROOT_URL);
-  const dashCookies = await jar.getCookies(DASHBOARD_URL);
-  const all = [...rootCookies, ...dashCookies];
-  const names = all.map((c) => `${c.key}=${c.value.slice(0, 12)}...`);
-  console.log(`[session] cookies in jar after ${label}:`, names.length ? names.join(', ') : '(none)');
-}
-
 async function refreshCsrfFromJar() {
   const rootCookies = await jar.getCookies(ROOT_URL);
   const dashCookies = await jar.getCookies(DASHBOARD_URL);
   const all = [...rootCookies, ...dashCookies];
-  // Try a few likely cookie names, not just the exact one we saw once.
   const found = all.find((c) =>
     ['csrf', 'csrf_token', 'csrftoken', 'xsrf-token', '_csrf'].includes(c.key.toLowerCase())
   );
   csrfToken = found ? found.value : null;
 }
 
-// GraphQL servers mostly respond to POST, but CSRF-issuing middleware often
-// runs on GET too (and sometimes ONLY on GET, since POST is treated as an
-// "unsafe" method that requires a token to already exist). We try several
-// approaches and log everything so we can see exactly what sets what.
-async function warmup() {
-  try {
-    const r1 = await client.get(`${ROOT_URL}/graphql`);
-    console.log('[session] GET root/graphql status:', r1.status, 'raw set-cookie:', r1.headers['set-cookie']);
-  } catch (err) {
-    console.log('[session] GET root/graphql errored:', err.message, err.response?.status, 'raw set-cookie:', err.response?.headers?.['set-cookie']);
-  }
-  await dumpAllCookies('GET root/graphql');
+// Imports every cookie Puppeteer's real browser session picked up into our
+// lightweight axios cookie jar, so all future polling requests can reuse a
+// Cloudflare-trusted session without needing to launch a browser again.
+async function importCookiesFromPage(page) {
+  const cookies = await page.cookies(ROOT_URL, DASHBOARD_URL);
+  console.log(
+    '[session] importing',
+    cookies.length,
+    'cookies from browser session:',
+    cookies.map((c) => c.name).join(', ') || '(none)'
+  );
 
-  try {
-    const r2 = await client.get(`${DASHBOARD_URL}/dashboard`);
-    console.log('[session] GET dashboard/dashboard status:', r2.status, 'raw set-cookie:', r2.headers['set-cookie']);
-  } catch (err) {
-    console.log('[session] GET dashboard/dashboard errored:', err.message, err.response?.status, 'raw set-cookie:', err.response?.headers?.['set-cookie']);
+  for (const c of cookies) {
+    const domain = c.domain.replace(/^\./, '');
+    const url = `https://${domain}${c.path || '/'}`;
+    const cookieStr = `${c.name}=${c.value}; Domain=${c.domain}; Path=${c.path || '/'}${
+      c.secure ? '; Secure' : ''
+    }`;
+    try {
+      await jar.setCookie(cookieStr, url);
+    } catch (err) {
+      console.log('[session] failed to import cookie', c.name, '-', err.message);
+    }
   }
-  await dumpAllCookies('GET dashboard/dashboard');
-
-  try {
-    const r3 = await client.post(
-      `${ROOT_URL}/graphql`,
-      { query: '{ __typename }', variables: {} },
-      { headers: { 'Content-Type': 'application/json' } }
-    );
-    console.log('[session] POST root/graphql status:', r3.status, 'raw set-cookie:', r3.headers['set-cookie']);
-  } catch (err) {
-    console.log('[session] POST root/graphql errored:', err.message, err.response?.status, 'raw set-cookie:', err.response?.headers?.['set-cookie']);
-  }
-  await dumpAllCookies('POST root/graphql');
-
-  await refreshCsrfFromJar();
-  console.log('[session] csrf token after warmup:', csrfToken ? 'FOUND' : 'MISSING');
 }
 
 async function login() {
@@ -99,28 +65,67 @@ async function login() {
     throw new Error('PRO_USERNAME / PRO_PASSWORD environment variables are not set.');
   }
 
-  await warmup();
+  console.log('[session] launching headless browser for login...');
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process',
+      '--no-zygote',
+    ],
+  });
 
-  const loginQuery = `mutation Login($name: String!, $password: String!) {\n  login(name: $name, password: $password)\n}`;
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(UA);
 
-  const headers = { 'Content-Type': 'application/json' };
-  if (csrfToken) headers['X-Csrf-Token'] = csrfToken;
+    console.log('[session] navigating to dashboard...');
+    await page.goto(`${DASHBOARD_URL}/dashboard`, {
+      waitUntil: 'networkidle2',
+      timeout: 30000,
+    });
 
-  const response = await client.post(
-    `${ROOT_URL}/graphql`,
-    { query: loginQuery, variables: { name: username, password } },
-    { headers }
-  );
+    console.log('[session] running login mutation inside the real browser context...');
+    const result = await page.evaluate(
+      async (rootUrl, name, password) => {
+        const query =
+          'mutation Login($name: String!, $password: String!) {\n  login(name: $name, password: $password)\n}';
+        const res = await fetch(`${rootUrl}/graphql`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ query, variables: { name, password } }),
+        });
+        const body = await res.json();
+        return { status: res.status, body };
+      },
+      ROOT_URL,
+      username,
+      password
+    );
 
-  console.log('[session] login response status:', response.status, 'has errors:', !!response.data.errors);
+    console.log(
+      '[session] login mutation status:',
+      result.status,
+      'has errors:',
+      !!result.body.errors
+    );
 
-  if (response.data.errors) {
-    throw new Error('PRO login failed: ' + JSON.stringify(response.data.errors));
+    if (result.body.errors) {
+      throw new Error('PRO login failed: ' + JSON.stringify(result.body.errors));
+    }
+
+    await importCookiesFromPage(page);
+    await refreshCsrfFromJar();
+    console.log('[session] login complete, csrf token:', csrfToken ? 'SET' : 'MISSING');
+
+    return true;
+  } finally {
+    await browser.close();
   }
-
-  await refreshCsrfFromJar();
-  console.log('[session] login succeeded, csrf token now:', getCsrfToken() ? 'SET' : 'STILL MISSING');
-  return true;
 }
 
 function getCsrfToken() {
