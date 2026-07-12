@@ -21,21 +21,32 @@ const client = wrapper(
 let csrfToken = null;
 
 async function refreshCsrfFromJar() {
-  const cookies = await jar.getCookies(DASHBOARD_URL);
-  const csrfCookie = cookies.find((c) => c.key === 'csrf');
-  csrfToken = csrfCookie ? csrfCookie.value : null;
+  // The csrf cookie's Domain is the apex (pokemonrevolution.net), so it's
+  // visible from either host — but check both in case that ever changes.
+  const rootCookies = await jar.getCookies(ROOT_URL);
+  const dashCookies = await jar.getCookies(DASHBOARD_URL);
+  const found = [...rootCookies, ...dashCookies].find((c) => c.key === 'csrf');
+  csrfToken = found ? found.value : null;
 }
 
-// Hits the dashboard once before logging in — some CSRF-protected APIs
-// require the csrf cookie to already exist before you can log in at all.
+// GraphQL servers only respond meaningfully to POST, so we can't warm up
+// cookies with a plain GET to a page. Instead we send a harmless
+// introspection-style query to the real endpoint — the server sets its
+// csrf/session cookies on this response regardless of whether the query
+// itself succeeds.
 async function warmup() {
   try {
-    await client.get(`${DASHBOARD_URL}/dashboard`);
+    const res = await client.post(
+      `${ROOT_URL}/graphql`,
+      { query: '{ __typename }', variables: {} },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+    console.log('[session] warmup status:', res.status);
   } catch (err) {
-    // The SPA route may not return a clean 200 without JS, that's fine —
-    // we only care about cookies being set on the response.
+    console.log('[session] warmup request errored (expected, checking cookies anyway):', err.message);
   }
   await refreshCsrfFromJar();
+  console.log('[session] csrf token after warmup:', csrfToken ? 'FOUND' : 'MISSING');
 }
 
 async function login() {
@@ -59,11 +70,14 @@ async function login() {
     { headers }
   );
 
+  console.log('[session] login response status:', response.status, 'has errors:', !!response.data.errors);
+
   if (response.data.errors) {
     throw new Error('PRO login failed: ' + JSON.stringify(response.data.errors));
   }
 
   await refreshCsrfFromJar();
+  console.log('[session] login succeeded, csrf token now:', getCsrfToken() ? 'SET' : 'STILL MISSING');
   return true;
 }
 
