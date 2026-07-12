@@ -1,0 +1,17 @@
+{
+  "name": "pro-leaderboard-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that shows live Pokemon Revolution Online leaderboards",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "deploy": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
