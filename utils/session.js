@@ -20,31 +20,58 @@ const client = wrapper(
 
 let csrfToken = null;
 
-async function refreshCsrfFromJar() {
-  // The csrf cookie's Domain is the apex (pokemonrevolution.net), so it's
-  // visible from either host — but check both in case that ever changes.
+async function dumpAllCookies(label) {
   const rootCookies = await jar.getCookies(ROOT_URL);
   const dashCookies = await jar.getCookies(DASHBOARD_URL);
-  const found = [...rootCookies, ...dashCookies].find((c) => c.key === 'csrf');
+  const all = [...rootCookies, ...dashCookies];
+  const names = all.map((c) => `${c.key}=${c.value.slice(0, 12)}...`);
+  console.log(`[session] cookies in jar after ${label}:`, names.length ? names.join(', ') : '(none)');
+}
+
+async function refreshCsrfFromJar() {
+  const rootCookies = await jar.getCookies(ROOT_URL);
+  const dashCookies = await jar.getCookies(DASHBOARD_URL);
+  const all = [...rootCookies, ...dashCookies];
+  // Try a few likely cookie names, not just the exact one we saw once.
+  const found = all.find((c) =>
+    ['csrf', 'csrf_token', 'csrftoken', 'xsrf-token', '_csrf'].includes(c.key.toLowerCase())
+  );
   csrfToken = found ? found.value : null;
 }
 
-// GraphQL servers only respond meaningfully to POST, so we can't warm up
-// cookies with a plain GET to a page. Instead we send a harmless
-// introspection-style query to the real endpoint — the server sets its
-// csrf/session cookies on this response regardless of whether the query
-// itself succeeds.
+// GraphQL servers mostly respond to POST, but CSRF-issuing middleware often
+// runs on GET too (and sometimes ONLY on GET, since POST is treated as an
+// "unsafe" method that requires a token to already exist). We try several
+// approaches and log everything so we can see exactly what sets what.
 async function warmup() {
   try {
-    const res = await client.post(
+    const r1 = await client.get(`${ROOT_URL}/graphql`);
+    console.log('[session] GET root/graphql status:', r1.status, 'raw set-cookie:', r1.headers['set-cookie']);
+  } catch (err) {
+    console.log('[session] GET root/graphql errored:', err.message, err.response?.status, 'raw set-cookie:', err.response?.headers?.['set-cookie']);
+  }
+  await dumpAllCookies('GET root/graphql');
+
+  try {
+    const r2 = await client.get(`${DASHBOARD_URL}/dashboard`);
+    console.log('[session] GET dashboard/dashboard status:', r2.status, 'raw set-cookie:', r2.headers['set-cookie']);
+  } catch (err) {
+    console.log('[session] GET dashboard/dashboard errored:', err.message, err.response?.status, 'raw set-cookie:', err.response?.headers?.['set-cookie']);
+  }
+  await dumpAllCookies('GET dashboard/dashboard');
+
+  try {
+    const r3 = await client.post(
       `${ROOT_URL}/graphql`,
       { query: '{ __typename }', variables: {} },
       { headers: { 'Content-Type': 'application/json' } }
     );
-    console.log('[session] warmup status:', res.status);
+    console.log('[session] POST root/graphql status:', r3.status, 'raw set-cookie:', r3.headers['set-cookie']);
   } catch (err) {
-    console.log('[session] warmup request errored (expected, checking cookies anyway):', err.message);
+    console.log('[session] POST root/graphql errored:', err.message, err.response?.status, 'raw set-cookie:', err.response?.headers?.['set-cookie']);
   }
+  await dumpAllCookies('POST root/graphql');
+
   await refreshCsrfFromJar();
   console.log('[session] csrf token after warmup:', csrfToken ? 'FOUND' : 'MISSING');
 }
