@@ -1,0 +1,15 @@
+{
+  "name": "emoji-stealer-bot",
+  "version": "1.0.0",
+  "description": "User-installable Discord bot to steal emojis into servers you manage",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "deploy": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
