@@ -7,11 +7,50 @@ const {
   ActionRowBuilder,
   StringSelectMenuBuilder,
   PermissionFlagsBits,
+  REST,
+  Routes,
 } = require('discord.js');
 
 // ---------- Keep-alive web server (needed for Render Web Service + UptimeRobot) ----------
 const app = express();
 app.get('/', (req, res) => res.send('Emoji Stealer bot is alive.'));
+
+// ---------- One-time command registration route ----------
+// Render's free tier doesn't include Shell access, so visit this URL once in a
+// browser (with your secret) instead of running `node deploy-commands.js` manually.
+// Example: https://your-app.onrender.com/deploy-commands?secret=YOUR_DEPLOY_SECRET
+app.get('/deploy-commands', async (req, res) => {
+  if (!process.env.DEPLOY_SECRET || req.query.secret !== process.env.DEPLOY_SECRET) {
+    return res.status(403).send('Forbidden.');
+  }
+
+  const commands = [
+    {
+      name: 'steal',
+      description: 'Steal a custom emoji and add it to a server you manage',
+      integration_types: [1],
+      contexts: [0, 1, 2],
+      options: [
+        {
+          name: 'emoji',
+          description: 'Paste the emoji you want to steal',
+          type: 3,
+          required: true,
+        },
+      ],
+    },
+  ];
+
+  try {
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+    res.send('Commands registered successfully. Check your bot logs to confirm, then remove/ignore this route.');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(`Failed: ${err.message}`);
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log('Keep-alive server running.');
 });
